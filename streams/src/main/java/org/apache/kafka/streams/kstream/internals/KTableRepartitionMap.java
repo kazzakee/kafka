@@ -53,6 +53,11 @@ public class KTableRepartitionMap<K, V, K1, V1> implements KTableProcessorSuppli
             public KTableValueGetter<K, KeyValue<K1, V1>> get() {
                 return new KTableMapValueGetter(parentValueGetterSupplier.get());
             }
+
+            @Override
+            public String[] storeNames() {
+                throw new StreamsException("Underlying state store not accessible due to repartitioning.");
+            }
         };
     }
 
@@ -76,16 +81,20 @@ public class KTableRepartitionMap<K, V, K1, V1> implements KTableProcessorSuppli
             if (key == null)
                 throw new StreamsException("Record key for the grouping KTable should not be null.");
 
-            KeyValue<K1, V1> newPair = mapper.apply(key, change.newValue);
-            KeyValue<K1, V1> oldPair = mapper.apply(key, change.oldValue);
+            // if the value is null, we do not need to forward its selected key-value further
+            KeyValue<K1, V1> newPair = change.newValue == null ? null : mapper.apply(key, change.newValue);
+            KeyValue<K1, V1> oldPair = change.oldValue == null ? null : mapper.apply(key, change.oldValue);
 
             // if the selected repartition key or value is null, skip
-            if (newPair != null && newPair.key != null && newPair.value != null) {
-                context().forward(newPair.key, new Change<>(newPair.value, null));
-            }
+            // forward oldPair first, to be consistent with reduce and aggregate
             if (oldPair != null && oldPair.key != null && oldPair.value != null) {
                 context().forward(oldPair.key, new Change<>(null, oldPair.value));
             }
+
+            if (newPair != null && newPair.key != null && newPair.value != null) {
+                context().forward(newPair.key, new Change<>(newPair.value, null));
+            }
+            
         }
     }
 

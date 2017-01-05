@@ -19,12 +19,14 @@ package kafka.log
 
 import java.io._
 import java.nio._
-import java.util.concurrent.atomic._
+import java.nio.channels._
 
 import kafka.common.LongRef
 import org.junit.Assert._
 import kafka.utils.TestUtils._
 import kafka.message._
+import kafka.common.KafkaException
+import org.easymock.EasyMock
 import org.junit.Test
 
 class FileMessageSetTest extends BaseMessageSetTestCases {
@@ -106,24 +108,28 @@ class FileMessageSetTest extends BaseMessageSetTestCases {
     // append a new message with a high offset
     val lastMessage = new Message("test".getBytes)
     messageSet.append(new ByteBufferMessageSet(NoCompressionCodec, new LongRef(50), lastMessage))
+    val messages = messageSet.toSeq
     var position = 0
-    assertEquals("Should be able to find the first message by its offset", 
-                 OffsetPosition(0L, position), 
-                 messageSet.searchFor(0, 0))
-    position += MessageSet.entrySize(messageSet.head.message)
+    val message1Size = MessageSet.entrySize(messages.head.message)
+    assertEquals("Should be able to find the first message by its offset",
+                 (OffsetPosition(0L, position), message1Size),
+                 messageSet.searchForOffsetWithSize(0, 0))
+    position += message1Size
+    val message2Size = MessageSet.entrySize(messages(1).message)
     assertEquals("Should be able to find second message when starting from 0", 
-                 OffsetPosition(1L, position), 
-                 messageSet.searchFor(1, 0))
+                 (OffsetPosition(1L, position), message2Size),
+                 messageSet.searchForOffsetWithSize(1, 0))
     assertEquals("Should be able to find second message starting from its offset", 
-                 OffsetPosition(1L, position), 
-                 messageSet.searchFor(1, position))
-    position += MessageSet.entrySize(messageSet.tail.head.message) + MessageSet.entrySize(messageSet.tail.tail.head.message)
+                 (OffsetPosition(1L, position), message2Size),
+                 messageSet.searchForOffsetWithSize(1, position))
+    position += message2Size + MessageSet.entrySize(messages(2).message)
+    val message4Size = MessageSet.entrySize(messages(3).message)
     assertEquals("Should be able to find fourth message from a non-existant offset", 
-                 OffsetPosition(50L, position), 
-                 messageSet.searchFor(3, position))
-    assertEquals("Should be able to find fourth message by correct offset", 
-                 OffsetPosition(50L, position), 
-                 messageSet.searchFor(50,  position))
+                 (OffsetPosition(50L, position), message4Size),
+                 messageSet.searchForOffsetWithSize(3, position))
+    assertEquals("Should be able to find fourth message by correct offset",
+                 (OffsetPosition(50L, position), message4Size),
+                 messageSet.searchForOffsetWithSize(50,  position))
   }
   
   /**
@@ -132,7 +138,7 @@ class FileMessageSetTest extends BaseMessageSetTestCases {
   @Test
   def testIteratorWithLimits() {
     val message = messageSet.toList(1)
-    val start = messageSet.searchFor(1, 0).position
+    val start = messageSet.searchForOffsetWithSize(1, 0)._1.position
     val size = message.message.size + 12
     val slice = messageSet.read(start, size)
     assertEquals(List(message), slice.toList)
@@ -146,11 +152,74 @@ class FileMessageSetTest extends BaseMessageSetTestCases {
   @Test
   def testTruncate() {
     val message = messageSet.toList.head
-    val end = messageSet.searchFor(1, 0).position
+    val end = messageSet.searchForOffsetWithSize(1, 0)._1.position
     messageSet.truncateTo(end)
     assertEquals(List(message), messageSet.toList)
     assertEquals(MessageSet.entrySize(message.message), messageSet.sizeInBytes)
   }
+
+  /**
+    * Test that truncateTo only calls truncate on the FileChannel if the size of the
+    * FileChannel is bigger than the target size. This is important because some JVMs
+    * change the mtime of the file, even if truncate should do nothing.
+    */
+  @Test
+  def testTruncateNotCalledIfSizeIsSameAsTargetSize() {
+    val channelMock = EasyMock.createMock(classOf[FileChannel])
+
+    EasyMock.expect(channelMock.size).andReturn(42L).atLeastOnce()
+    EasyMock.expect(channelMock.position(42L)).andReturn(null)
+    EasyMock.replay(channelMock)
+
+    val msgSet = new FileMessageSet(tempFile(), channelMock)
+    msgSet.truncateTo(42)
+
+    EasyMock.verify(channelMock)
+  }
+
+  /**
+    * Expect a KafkaException if targetSize is bigger than the size of
+    * the FileMessageSet.
+    */
+  @Test
+  def testTruncateNotCalledIfSizeIsBiggerThanTargetSize() {
+    val channelMock = EasyMock.createMock(classOf[FileChannel])
+
+    EasyMock.expect(channelMock.size).andReturn(42L).atLeastOnce()
+    EasyMock.expect(channelMock.position(42L)).andReturn(null)
+    EasyMock.replay(channelMock)
+
+    val msgSet = new FileMessageSet(tempFile(), channelMock)
+
+    try {
+      msgSet.truncateTo(43)
+      fail("Should throw KafkaException")
+    } catch {
+      case e: KafkaException => // expected
+    }
+
+    EasyMock.verify(channelMock)
+  }
+
+  /**
+    * see #testTruncateNotCalledIfSizeIsSameAsTargetSize
+    */
+  @Test
+  def testTruncateIfSizeIsDifferentToTargetSize() {
+    val channelMock = EasyMock.createMock(classOf[FileChannel])
+
+    EasyMock.expect(channelMock.size).andReturn(42L).atLeastOnce()
+    EasyMock.expect(channelMock.position(42L)).andReturn(null).once()
+    EasyMock.expect(channelMock.truncate(23L)).andReturn(null).once()
+    EasyMock.expect(channelMock.position(23L)).andReturn(null).once()
+    EasyMock.replay(channelMock)
+
+    val msgSet = new FileMessageSet(tempFile(), channelMock)
+    msgSet.truncateTo(23)
+
+    EasyMock.verify(channelMock)
+  }
+
 
   /**
    * Test the new FileMessageSet with pre allocate as true
@@ -207,7 +276,7 @@ class FileMessageSetTest extends BaseMessageSetTestCases {
   @Test
   def testFormatConversionWithPartialMessage() {
     val message = messageSet.toList(1)
-    val start = messageSet.searchFor(1, 0).position
+    val start = messageSet.searchForOffsetWithSize(1, 0)._1.position
     val size = message.message.size + 12
     val slice = messageSet.read(start, size - 1)
     val messageV0 = slice.toMessageFormat(Message.MagicValue_V0)

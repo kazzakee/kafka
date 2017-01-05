@@ -20,11 +20,13 @@ import kafka.log.Log
 import kafka.zk.ZooKeeperTestHarness
 import kafka.utils.TestUtils
 import kafka.utils.ZkUtils._
-import kafka.server.{KafkaServer, KafkaConfig}
+import kafka.server.{KafkaConfig, KafkaServer}
 import org.junit.Assert._
 import org.junit.Test
 import java.util.Properties
+
 import kafka.common.{TopicAlreadyMarkedForDeletionException, TopicAndPartition}
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException
 
 class DeleteTopicTest extends ZooKeeperTestHarness {
 
@@ -122,7 +124,7 @@ class DeleteTopicTest extends ZooKeeperTestHarness {
     // wait until reassignment is completed
     TestUtils.waitUntilTrue(() => {
       val partitionsBeingReassigned = zkUtils.getPartitionsBeingReassigned().mapValues(_.newReplicas)
-      ReassignPartitionsCommand.checkIfPartitionReassignmentSucceeded(zkUtils, topicAndPartition, newReplicas,
+      ReassignPartitionsCommand.checkIfPartitionReassignmentSucceeded(zkUtils, topicAndPartition,
         Map(topicAndPartition -> newReplicas), partitionsBeingReassigned) == ReassignmentFailed
     }, "Partition reassignment shouldn't complete.")
     val controllerId = zkUtils.getController()
@@ -202,7 +204,12 @@ class DeleteTopicTest extends ZooKeeperTestHarness {
     val topic = topicAndPartition.topic
     val servers = createTestTopicAndCluster(topic)
     // start topic deletion
-    AdminUtils.deleteTopic(zkUtils, "test2")
+    try {
+      AdminUtils.deleteTopic(zkUtils, "test2")
+      fail("Expected UnknownTopicOrPartitionException")
+    } catch {
+      case e: UnknownTopicOrPartitionException => // expected exception
+    }
     // verify delete topic path for test2 is removed from zookeeper
     TestUtils.verifyTopicDeletion(zkUtils, "test2", 1, servers)
     // verify that topic test is untouched

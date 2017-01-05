@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * A convenient base class for configurations to extend.
@@ -168,7 +169,8 @@ public class AbstractConfig {
         b.append(getClass().getSimpleName());
         b.append(" values: ");
         b.append(Utils.NL);
-        for (Map.Entry<String, Object> entry : this.values.entrySet()) {
+
+        for (Map.Entry<String, Object> entry : new TreeMap<>(this.values).entrySet()) {
             b.append('\t');
             b.append(entry.getKey());
             b.append(" = ");
@@ -183,7 +185,7 @@ public class AbstractConfig {
      */
     public void logUnused() {
         for (String key : unused())
-            log.warn("The configuration {} = {} was supplied but isn't a known config.", key, this.originals.get(key));
+            log.warn("The configuration '{}' was supplied but isn't a known config.", key);
     }
 
     /**
@@ -219,13 +221,18 @@ public class AbstractConfig {
         List<T> objects = new ArrayList<T>();
         if (klasses == null)
             return objects;
-        for (String klass : klasses) {
+        for (Object klass : klasses) {
             Object o;
-            try {
-                o = Utils.newInstance(klass, t);
-            } catch (ClassNotFoundException e) {
-                throw new KafkaException(klass + " ClassNotFoundException exception occured", e);
-            }
+            if (klass instanceof String) {
+                try {
+                    o = Utils.newInstance((String) klass, t);
+                } catch (ClassNotFoundException e) {
+                    throw new KafkaException(klass + " ClassNotFoundException exception occured", e);
+                }
+            } else if (klass instanceof Class<?>) {
+                o = Utils.newInstance((Class<?>) klass);
+            } else
+                throw new KafkaException("List contains element of type " + klass.getClass() + ", expected String or Class");
             if (!t.isInstance(o))
                 throw new KafkaException(klass + " is not an instance of " + t.getName());
             if (o instanceof Configurable)
